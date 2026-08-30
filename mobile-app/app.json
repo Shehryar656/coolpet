@@ -1,0 +1,16 @@
+{
+  "expo": {
+    "name": "CoolPet",
+    "slug": "coolpet",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#050505",
+    "splash": {
+      "backgroundColor": "#050505",
+      "resizeMode": "contain"
+    },
+    "ios": { "supportsTablet": true, "bundleIdentifier": "io.coolpet.app" },
+    "android": { "package": "io.coolpet.app" }
+  }
+}

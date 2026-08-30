@@ -1,0 +1,116 @@
+{
+  "project_name": "CoolPet",
+  "theme": "dark",
+  "design_philosophy": "Aureum Noir. A high-end editorial canvas for a technical IoT product. The UI mimics a high-end luxury dashboard with precise biometric readouts. We fuse luxury fashion aesthetics (deep blacks, gold accents, crisp editorial fonts) with elite performance interfaces (cyber-cyan neon markers, dense data displays).",
+  "typography": {
+    "fonts": {
+      "headings": "Outfit, sans-serif",
+      "body": "Manrope, sans-serif",
+      "data_numbers": "JetBrains Mono, monospace"
+    },
+    "scale": {
+      "h1": "text-5xl sm:text-6xl font-light tracking-tighter",
+      "h2": "text-3xl sm:text-4xl font-normal tracking-tight",
+      "h3": "text-xl sm:text-2xl font-medium tracking-tight",
+      "body": "text-base font-normal leading-relaxed text-slate-300",
+      "overline": "text-xs font-bold uppercase tracking-[0.2em] text-[#D4AF37]",
+      "data": "text-sm font-mono tracking-tight"
+    },
+    "installation": "Add Google Fonts imports for Outfit, Manrope, and JetBrains Mono."
+  },
+  "colors": {
+    "background": {
+      "base": "#050505",
+      "surface": "#0F0F13",
+      "glass": "rgba(255, 255, 255, 0.03)"
+    },
+    "text": {
+      "primary": "#FFFFFF",
+      "secondary": "#A1A1AA",
+      "muted": "#52525B"
+    },
+    "accents": {
+      "primary_gold": "#D4AF37",
+      "primary_gold_glow": "rgba(212, 175, 55, 0.3)",
+      "tech_cyan": "#00E5FF",
+      "biometric_red": "#FF3B30",
+      "safe_green": "#34C759"
+    },
+    "borders": {
+      "subtle": "rgba(255, 255, 255, 0.08)",
+      "focus": "#D4AF37"
+    }
+  },
+  "visual_enhancers": {
+    "glassmorphism": "Use 'backdrop-blur-xl bg-white/5 border border-white/10' for dashboard sidebar, floating map controls, and pricing cards. Never use pure transparent backgrounds.",
+    "shadows": "Replace traditional drop shadows with inner glows and subtle colored drop-shadows (e.g., drop-shadow-[0_0_15px_rgba(0,229,255,0.4)] for active pet markers).",
+    "tracing_beam": "Apply a moving gradient border effect for the 'Pro' pricing tier card to make it feel premium and active."
+  },
+  "grids_layouts": {
+    "marketing_features": {
+      "strategy": "The Tetris Grid. grid-cols-1 md:grid-cols-12 gap-8.",
+      "items": "Feature 1 (Live Map) spans 8 cols. Feature 2 (Biometrics) spans 4 cols. Feature 3 (Geofence) spans full width 12 cols. Use generous padding (p-12) inside these feature cards."
+    },
+    "dashboard": {
+      "strategy": "High Density Technical Grid. Cardless aesthetics where possible, relying on 1px subtle borders.",
+      "structure": "Sidebar (w-72 fixed, glassmorphic) + Main Content (flex-1 relative).",
+      "map_area": "Full bleed absolute map underneath, with floating glassmorphic widgets (Health Stats, Geofence Controls) positioned absolute bottom and right."
+    }
+  },
+  "components_strategy": {
+    "buttons": "Pill-shaped (rounded-full). Primary buttons use #D4AF37 background with black text. Hover state must lift slightly (-translate-y-0.5) and increase brightness.",
+    "map": "Leaflet JS. MUST use CartoDB Dark Matter tile layer ('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png') to maintain the luxury dark mode aesthetic. Standard openstreetmap tiles will ruin the design.",
+    "pet_marker": "Custom SVG wrapped in a Framer Motion div that pulses (scale 1 to 1.5, opacity 0.8 to 0) with 'tech_cyan' to represent live WebSocket GPS updates.",
+    "health_stats_card": "Floating glass panel on the dashboard. Use 'biometric_red' for a pulsing heart icon next to BPM data.",
+    "geofence_slider": "Shadcn Slider customized. The track should be dark gray, the active fill and thumb should be 'tech_cyan'.",
+    "icons": "Use 'lucide-react' with a consistent stroke-width of 1.5 for a delicate, premium feel."
+  },
+  "motion": {
+    "page_transitions": "Fade in with a slight upward translation (y: 20 -> 0) over 0.6s using Framer Motion.",
+    "live_data": "Real-time stats should have a color-flash effect (e.g., flash cyan briefly) when the WebSocket pushes new data.",
+    "hover_states": "All interactive elements must transition smoothly (duration-300 ease-out)."
+  },
+  "media": {
+    "image_urls": {
+      "hero_background": {
+        "url": "https://images.unsplash.com/photo-1477936432016-8172ed08637e?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2Njl8MHwxfHNlYXJjaHwyfHxlbGVnYW50JTIwZG9nJTIwcG9ydHJhaXQlMjBkYXJrJTIwYmFja2dyb3VuZHxlbnwwfHx8fDE3ODgwOTk1MjZ8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Elegant black dog portrait on dark background. Use with a linear gradient overlay (bg-gradient-to-r from-black/80 to-black/30) so text remains highly readable."
+      },
+      "pet_avatar_1": {
+        "url": "https://images.unsplash.com/photo-1503431128871-cd250803fa41?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMzJ8MHwxfHNlYXJjaHwxfHxzbGVlayUyMGNhdCUyMHBvcnRyYWl0JTIwZGFya3xlbnwwfHx8fDE3ODgwOTk1MjZ8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Macro photography of black cat with green eyes. Use for the dashboard pet list avatar."
+      },
+      "abstract_map_bg": {
+        "url": "https://images.unsplash.com/photo-1768916321622-6418c1af5de5?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA3MDR8MHwxfHNlYXJjaHwxfHxhYnN0cmFjdCUyMGRhcmslMjB0b3BvZ3JhcGhpYyUyMG1hcHxlbnwwfHx8fDE3ODgwOTk1Mzd8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Abstract topographic lines. Use as a subtle background pattern for the 'Live Tracking' feature card."
+      }
+    }
+  },
+  "instructions_to_main_agent": [
+    "Do not use generic 'Inter' or 'Roboto' for headings. Stick to 'Outfit'.",
+    "Never center-align large blocks of text; left-align for high-end editorial feel.",
+    "Implement actual WebSocket simulations for the Map marker and heartbeat (BPM) stats on the dashboard.",
+    "Apply 'data-testid' to all buttons, links, inputs, and key text fields.",
+    "Use standard Tailwind CSS classes. For glass effects, use 'backdrop-blur-xl bg-white/5'.",
+    "Ensure Leaflet Map uses the CartoDB Dark Matter tile layer for the premium aesthetic. DO NOT use standard light OSM maps.",
+    "Do not use transparent backgrounds on dropdowns or floating headers."
+  ],
+  "universal_guidelines": [
+    "You tend to converge toward generic outputs. Avoid this: make creative, distinctive frontends that surprise and delight.",
+    "Create depth through layered design elements with z-index hierarchy and glassmorphism.",
+    "You MUST NOT apply universal transition (e.g., transition: all). Add transitions to specific properties like transform and opacity.",
+    "You MUST NOT center align the app container (.App { text-align: center; }).",
+    "NEVER use emoji characters for icons. Use lucide-react.",
+    "Every interaction needs micro-animations - hover states, transitions, entrance animations."
+  ],
+  "testing_attributes": {
+    "convention": "kebab-case, role-based",
+    "examples": [
+      "data-testid='hero-cta-button'",
+      "data-testid='pricing-pro-tier-button'",
+      "data-testid='login-submit-button'",
+      "data-testid='dashboard-geofence-slider'",
+      "data-testid='dashboard-pet-marker'"
+    ]
+  }
+}
