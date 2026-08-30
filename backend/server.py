@@ -327,22 +327,85 @@ async def list_pets(user=Depends(get_current_user)):
 
 @api_router.post("/pets")
 async def create_pet(data: PetCreate, user=Depends(get_current_user)):
-    # count existing pets so we can pick the next palette color
     existing = await db.pets.count_documents({"user_id": user["id"]})
     color = data.color if data.color and data.color != "#00E5FF" else PET_PALETTE[existing % len(PET_PALETTE)]
+    # IMEI: accept 15-digit real IMEI, 16-hex device id, or generate a synthetic 15-digit one
+    imei_raw = (data.imei or f"860{random.randint(100000000000, 999999999999)}").strip().lower()
     pet = Pet(
         user_id=user["id"],
         name=data.name,
         species=data.species,
         breed=data.breed,
-        imei=(data.imei or f"860{random.randint(100000000000, 999999999999)}").lower(),
+        imei=imei_raw,
         color=color,
         avatar=data.avatar,
     )
     doc = pet.model_dump()
     await db.pets.insert_one(doc)
     doc.pop("_id", None)
+
+    # Instant-live: fire the first pet_update immediately so the marker appears
+    # on connected dashboards without waiting for the main simulator tick.
+    asyncio.create_task(_broadcast_initial_pet(doc))
+
     return {"pet": doc}
+
+async def _broadcast_initial_pet(pet: Dict[str, Any]):
+    """Emit two immediate pet_update frames + append ONE location point so the
+    marker appears (and appears to move) the instant a collar is enrolled and
+    history is non-empty. The main simulator loop (every 2s) and real
+    /api/iot/ingest packets take it from there.
+
+    NOTE: intentionally does NOT mutate db.pets (esp. inside_geofence) — that
+    would race with concurrent /iot/ingest calls and the main simulator loop
+    (which owns geofence transitions + breach events).
+    """
+    try:
+        base_lat, base_lng = pet["latest_lat"], pet["latest_lng"]
+        now_iso = datetime.now(timezone.utc).isoformat()
+        inside = _within_geofence(
+            base_lat, base_lng,
+            pet["geofence_lat"], pet["geofence_lng"], pet["geofence_radius"],
+        )
+        # Append-only: cannot race with breach detection.
+        await db.locations.insert_one({
+            "id": str(uuid.uuid4()),
+            "pet_id": pet["id"], "imei": pet["imei"],
+            "lat": base_lat, "lng": base_lng,
+            "bpm": pet["latest_bpm"], "battery": pet["latest_battery"],
+            "speed": pet.get("latest_speed", 0.0),
+            "timestamp": now_iso,
+        })
+        await manager.broadcast({
+            "type": "pet_update",
+            "pet_id": pet["id"], "user_id": pet["user_id"],
+            "name": pet["name"], "color": pet.get("color", "#00E5FF"),
+            "lat": base_lat, "lng": base_lng,
+            "bpm": pet["latest_bpm"], "battery": pet["latest_battery"],
+            "speed": pet.get("latest_speed", 0.0),
+            "inside_geofence": inside,
+            "timestamp": now_iso,
+        })
+        # Second broadcast ~500ms later — broadcast-only, no persistence.
+        await asyncio.sleep(0.5)
+        jitter_lat = base_lat + (random.random() - 0.5) * 0.0003
+        jitter_lng = base_lng + (random.random() - 0.5) * 0.0003
+        inside2 = _within_geofence(
+            jitter_lat, jitter_lng,
+            pet["geofence_lat"], pet["geofence_lng"], pet["geofence_radius"],
+        )
+        await manager.broadcast({
+            "type": "pet_update",
+            "pet_id": pet["id"], "user_id": pet["user_id"],
+            "name": pet["name"], "color": pet.get("color", "#00E5FF"),
+            "lat": jitter_lat, "lng": jitter_lng,
+            "bpm": pet["latest_bpm"], "battery": pet["latest_battery"],
+            "speed": pet.get("latest_speed", 0.0),
+            "inside_geofence": inside2,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception as e:
+        logger.warning(f"initial broadcast failed for pet {pet.get('id')}: {e}")
 
 @api_router.patch("/pets/{pet_id}/geofence")
 async def update_geofence(pet_id: str, data: PetGeofenceUpdate, user=Depends(get_current_user)):

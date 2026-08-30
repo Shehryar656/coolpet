@@ -59,7 +59,7 @@ export default function Dashboard() {
   const [recenterKey, setRecenterKey] = useState(0);
   const [fitKey, setFitKey] = useState(0);
   const [addOpen, setAddOpen] = useState(false);
-  const [newPet, setNewPet] = useState({ name: "", species: "Dog", breed: "" });
+  const [newPet, setNewPet] = useState({ name: "", species: "Dog", breed: "", imei: "" });
   const [flash, setFlash] = useState(false);
   const [replayOpen, setReplayOpen] = useState(false);
   const [replayFocus, setReplayFocus] = useState(null);
@@ -109,11 +109,20 @@ export default function Dashboard() {
         try {
           const msg = JSON.parse(ev.data);
           if (msg.type === "pet_update") {
-            setPets((prev) => prev.map((p) => p.id === msg.pet_id ? {
-              ...p, latest_lat: msg.lat, latest_lng: msg.lng, latest_bpm: msg.bpm,
-              latest_battery: msg.battery, latest_speed: msg.speed,
-              inside_geofence: msg.inside_geofence,
-            } : p));
+            setPets((prev) => {
+              const exists = prev.some((p) => p.id === msg.pet_id);
+              if (!exists) {
+                // Unknown pet arrived on the wire — fetch fresh list so it
+                // appears instantly without a page refresh.
+                loadPets();
+                return prev;
+              }
+              return prev.map((p) => p.id === msg.pet_id ? {
+                ...p, latest_lat: msg.lat, latest_lng: msg.lng, latest_bpm: msg.bpm,
+                latest_battery: msg.battery, latest_speed: msg.speed,
+                inside_geofence: msg.inside_geofence,
+              } : p);
+            });
             if (viewMode === "single" && selectedId === msg.pet_id) {
               setTrail((prev) => [...prev.slice(-499), [msg.lat, msg.lng]]);
               setFlash(true);
@@ -133,16 +142,24 @@ export default function Dashboard() {
 
   const createPet = async (e) => {
     e.preventDefault();
+    const imei = (newPet.imei || "").trim();
+    if (!/^\d{15}$/.test(imei)) {
+      toast.error("IMEI must be exactly 15 digits.");
+      return;
+    }
     try {
-      const { data } = await api.post("/pets", newPet);
-      toast.success(`Enrolled ${data.pet.name}`);
+      const { data } = await api.post("/pets", { ...newPet, imei });
+      toast.success(`Streaming live from ${data.pet.name}`);
       setAddOpen(false);
-      setNewPet({ name: "", species: "Dog", breed: "" });
-      await loadPets();
+      setNewPet({ name: "", species: "Dog", breed: "", imei: "" });
+      // Add optimistically so the marker renders BEFORE the refetch completes.
+      setPets((prev) => (prev.some((p) => p.id === data.pet.id) ? prev : [...prev, data.pet]));
       setSelectedId(data.pet.id);
       setViewMode("single");
+      setVisiblePetIds((prev) => new Set(prev).add(data.pet.id));
+      loadPets();
     } catch (e) {
-      toast.error("Could not enroll pet");
+      toast.error(e?.response?.data?.detail || "Could not enroll pet");
     }
   };
 
@@ -511,6 +528,23 @@ export default function Dashboard() {
                     data-testid="add-pet-breed-input"
                     placeholder="Optional"
                   />
+                </div>
+              </div>
+              <div>
+                <label className="text-xs uppercase tracking-widest text-white/50">IMEI · 15 digits</label>
+                <input
+                  required
+                  inputMode="numeric"
+                  pattern="\d{15}"
+                  maxLength={15}
+                  value={newPet.imei}
+                  onChange={(e) => setNewPet({ ...newPet, imei: e.target.value.replace(/\D/g, "").slice(0, 15) })}
+                  className="mt-2 w-full bg-transparent border-b border-white/15 focus:border-[#D4AF37] outline-none py-2 cp-mono transition-colors"
+                  data-testid="add-pet-imei-input"
+                  placeholder="860123456789012"
+                />
+                <div className="text-[10px] text-white/40 mt-1 cp-mono">
+                  {newPet.imei.length}/15 · tracker collar identifier
                 </div>
               </div>
             </div>

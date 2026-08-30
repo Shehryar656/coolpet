@@ -511,3 +511,108 @@ def test_websocket_broadcast():
         assert data.get("type") in ("demo_device", "pet_update", "raw_device", "breach_alert")
     finally:
         ws.close()
+
+
+# ---------- Instant Live Tracking on IMEI Registration ----------
+def test_create_pet_with_15_digit_imei_persists_lowercased(auth_headers):
+    """POST /api/pets accepts a real 15-digit IMEI and stores it lowercased."""
+    imei = "860123456789012"
+    r = requests.post(f"{API}/pets", headers=auth_headers,
+                      json={"name": "TEST Instant15", "imei": imei})
+    assert r.status_code == 200, r.text
+    pet = r.json()["pet"]
+    assert pet["imei"] == imei  # already lower/numeric
+    # verify persistence via GET /pets list
+    lst = requests.get(f"{API}/pets", headers=auth_headers).json()["pets"]
+    match = next((p for p in lst if p["id"] == pet["id"]), None)
+    assert match is not None
+    assert match["imei"] == imei
+
+
+def test_create_pet_without_imei_generates_15_digit_860(auth_headers):
+    """When `imei` is omitted, server generates a 15-digit '860…' fallback."""
+    r = requests.post(f"{API}/pets", headers=auth_headers,
+                      json={"name": "TEST NoImei"})
+    assert r.status_code == 200, r.text
+    imei = r.json()["pet"]["imei"]
+    assert imei.startswith("860")
+    assert len(imei) == 15
+    assert imei.isdigit()
+
+
+def test_create_pet_history_populated_within_2_5s(auth_headers):
+    """After POST /pets, the initial-broadcast task inserts locations; history should return >=1 point within 2.5s."""
+    imei = f"860{uuid.uuid4().int % 10**12:012d}"
+    r = requests.post(f"{API}/pets", headers=auth_headers,
+                      json={"name": "TEST HistBurst", "imei": imei})
+    assert r.status_code == 200
+    pet_id = r.json()["pet"]["id"]
+    # wait up to 2.5s (endpoint schedules 4 frames @400ms cadence after t=0)
+    deadline = time.time() + 2.5
+    points = []
+    while time.time() < deadline:
+        h = requests.get(f"{API}/pets/{pet_id}/history?hours=1&limit=50",
+                         headers=auth_headers)
+        if h.status_code == 200:
+            points = h.json().get("points", [])
+            if len(points) >= 1:
+                break
+        time.sleep(0.25)
+    assert len(points) >= 1, f"Expected >=1 point within 2.5s, got {len(points)}"
+
+
+def test_create_pet_broadcasts_pet_update_over_websocket(auth_headers):
+    """A client connected to /api/ws/live should receive >=1 pet_update with the
+    new pet_id within ~1s of POST /api/pets, and >=2 total within ~2s."""
+    try:
+        import websocket
+    except ImportError:
+        pytest.skip("websocket-client not installed")
+
+    ws_url = BASE_URL.replace("https://", "wss://").replace("http://", "ws://") + "/api/ws/live"
+    ws = websocket.create_connection(ws_url, timeout=8)
+    try:
+        # Drain any initial demo frames without blocking too long
+        ws.settimeout(0.2)
+        for _ in range(20):
+            try:
+                ws.recv()
+            except Exception:
+                break
+
+        # Create pet AFTER the ws is connected
+        imei = f"860{uuid.uuid4().int % 10**12:012d}"
+        t0 = time.time()
+        r = requests.post(f"{API}/pets", headers=auth_headers,
+                          json={"name": "TEST WSInstant", "imei": imei})
+        assert r.status_code == 200, r.text
+        pet_id = r.json()["pet"]["id"]
+
+        # Collect pet_update frames for this pet_id within a 2.5s window
+        matches = []
+        first_match_time = None
+        ws.settimeout(2.5)
+        deadline = time.time() + 2.5
+        while time.time() < deadline:
+            try:
+                ws.settimeout(max(0.05, deadline - time.time()))
+                raw = ws.recv()
+            except Exception:
+                break
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                continue
+            if msg.get("type") == "pet_update" and msg.get("pet_id") == pet_id:
+                if first_match_time is None:
+                    first_match_time = time.time() - t0
+                matches.append(msg)
+                if len(matches) >= 2 and first_match_time is not None and first_match_time <= 1.5:
+                    # got enough; keep going only if still within window
+                    if len(matches) >= 5:
+                        break
+        assert first_match_time is not None, "No pet_update frame received for new pet_id"
+        assert first_match_time <= 1.5, f"First frame arrived at {first_match_time:.2f}s (>1.5s)"
+        assert len(matches) >= 2, f"Expected >=2 pet_update frames within 2.5s, got {len(matches)}"
+    finally:
+        ws.close()
