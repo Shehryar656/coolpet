@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect, Request, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -128,17 +128,48 @@ def make_token(user_id: str) -> str:
     }
     return pyjwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
-async def get_current_user(creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme)) -> Dict[str, Any]:
-    if not creds:
-        raise HTTPException(401, "Missing token")
-    try:
-        payload = pyjwt.decode(creds.credentials, JWT_SECRET, algorithms=[JWT_ALG])
-        user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0, "password_hash": 0})
-        if not user:
-            raise HTTPException(401, "User not found")
-        return user
-    except pyjwt.PyJWTError as e:
-        raise HTTPException(401, f"Invalid token: {e}")
+async def _resolve_user_from_session_token(session_token: str) -> Optional[Dict[str, Any]]:
+    session = await db.user_sessions.find_one({"session_token": session_token}, {"_id": 0})
+    if not session:
+        return None
+    expires_at = session.get("expires_at")
+    if isinstance(expires_at, str):
+        try:
+            expires_at = datetime.fromisoformat(expires_at)
+        except Exception:
+            return None
+    if expires_at is None:
+        return None
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at < datetime.now(timezone.utc):
+        return None
+    return await db.users.find_one({"id": session["user_id"]}, {"_id": 0, "password_hash": 0})
+
+async def get_current_user(request: Request) -> Dict[str, Any]:
+    # 1) Emergent session cookie (Google OAuth flow)
+    session_token = request.cookies.get("session_token")
+    if session_token:
+        user = await _resolve_user_from_session_token(session_token)
+        if user:
+            return user
+    # 2) Authorization header — either session_token or JWT
+    auth = request.headers.get("authorization") or request.headers.get("Authorization") or ""
+    if auth.lower().startswith("bearer "):
+        token = auth[7:].strip()
+        # Try as Emergent session first
+        user = await _resolve_user_from_session_token(token)
+        if user:
+            return user
+        # Fallback to legacy JWT
+        try:
+            payload = pyjwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+            user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0, "password_hash": 0})
+            if user:
+                return user
+        except pyjwt.PyJWTError:
+            pass
+    raise HTTPException(401, "Not authenticated")
 
 # ------------------------------------------------------------------
 # WebSocket manager for live pet updates
@@ -198,7 +229,93 @@ async def login(data: UserLogin):
 
 @api_router.get("/auth/me")
 async def me(user=Depends(get_current_user)):
-    return {"user": {"id": user["id"], "email": user["email"], "name": user["name"], "plan": user.get("plan", "free")}}
+    return {"user": {
+        "id": user["id"],
+        "email": user["email"],
+        "name": user["name"],
+        "plan": user.get("plan", "free"),
+        "picture": user.get("picture"),
+        "provider": user.get("provider", "email"),
+    }}
+
+# ------------------------------------------------------------------
+# Emergent-managed Google OAuth
+# ------------------------------------------------------------------
+import requests as _requests  # sync HTTP; called via asyncio.to_thread
+
+EMERGENT_OAUTH_SESSION_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
+
+class GoogleSessionRequest(BaseModel):
+    session_id: str
+
+def _fetch_emergent_session(session_id: str) -> Dict[str, Any]:
+    r = _requests.get(EMERGENT_OAUTH_SESSION_URL, headers={"X-Session-ID": session_id}, timeout=10)
+    if r.status_code != 200:
+        raise HTTPException(401, f"Emergent session lookup failed ({r.status_code})")
+    return r.json()
+
+@api_router.post("/auth/google/session")
+async def google_session(body: GoogleSessionRequest, response: Response):
+    """Exchange an Emergent Google session_id for a signed-in user + session cookie."""
+    data = await asyncio.to_thread(_fetch_emergent_session, body.session_id)
+    email = (data.get("email") or "").lower()
+    if not email:
+        raise HTTPException(400, "Emergent response missing email")
+    name = data.get("name") or email.split("@")[0]
+    picture = data.get("picture")
+    session_token = data.get("session_token")
+    if not session_token:
+        raise HTTPException(400, "Emergent response missing session_token")
+
+    # Upsert user by email
+    user = await db.users.find_one({"email": email}, {"_id": 0})
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if not user:
+        user_id = str(uuid.uuid4())
+        user = {
+            "id": user_id,
+            "email": email,
+            "name": name,
+            "picture": picture,
+            "plan": "free",
+            "provider": "google",
+            "created_at": now_iso,
+        }
+        await db.users.insert_one(user)
+    else:
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$set": {"name": name, "picture": picture, "provider": user.get("provider", "google")}},
+        )
+
+    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+    await db.user_sessions.update_one(
+        {"session_token": session_token},
+        {"$set": {
+            "session_token": session_token,
+            "user_id": user["id"],
+            "expires_at": expires_at.isoformat(),
+            "created_at": now_iso,
+        }},
+        upsert=True,
+    )
+    response.set_cookie(
+        key="session_token", value=session_token,
+        max_age=7 * 24 * 60 * 60,
+        httponly=True, secure=True, samesite="none", path="/",
+    )
+    return {"user": {
+        "id": user["id"], "email": email, "name": name,
+        "picture": picture, "plan": user.get("plan", "free"), "provider": "google",
+    }}
+
+@api_router.post("/auth/logout")
+async def auth_logout(request: Request, response: Response):
+    st = request.cookies.get("session_token")
+    if st:
+        await db.user_sessions.delete_one({"session_token": st})
+    response.delete_cookie("session_token", path="/", samesite="none", secure=True)
+    return {"ok": True}
 
 # ------------------------------------------------------------------
 # Pets routes

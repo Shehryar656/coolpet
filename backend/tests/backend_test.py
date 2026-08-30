@@ -360,6 +360,142 @@ def test_delete_pet(auth_headers, created_pet):
     assert r2.status_code == 404
 
 
+# ---------- Emergent Google OAuth (mocked via seeded Mongo sessions) ----------
+from pymongo import MongoClient
+from datetime import datetime, timezone, timedelta
+
+_MONGO_URL = _BE_ENV.get("MONGO_URL", "mongodb://localhost:27017")
+_DB_NAME = _BE_ENV.get("DB_NAME", "test_database")
+
+
+@pytest.fixture(scope="module")
+def mongo_db():
+    c = MongoClient(_MONGO_URL)
+    yield c[_DB_NAME]
+    c.close()
+
+
+@pytest.fixture
+def seeded_google_session(mongo_db):
+    """Seed a fresh user + user_sessions doc; cleanup after test."""
+    suffix = uuid.uuid4().hex[:10]
+    user_id = f"test-google-user-{suffix}"
+    session_token = f"test_session_{suffix}"
+    email = f"test.google.{suffix}@example.com"
+    now = datetime.now(timezone.utc)
+    mongo_db.users.insert_one({
+        "id": user_id, "email": email, "name": "Google Test User",
+        "picture": "https://via.placeholder.com/150",
+        "provider": "google", "plan": "free",
+        "created_at": now.isoformat(),
+    })
+    mongo_db.user_sessions.insert_one({
+        "user_id": user_id, "session_token": session_token,
+        "expires_at": (now + timedelta(days=7)).isoformat(),
+        "created_at": now.isoformat(),
+    })
+    yield {"user_id": user_id, "session_token": session_token, "email": email}
+    mongo_db.user_sessions.delete_many({"session_token": session_token})
+    mongo_db.users.delete_many({"id": user_id})
+    mongo_db.pets.delete_many({"user_id": user_id})
+
+
+@pytest.fixture
+def expired_google_session(mongo_db):
+    suffix = uuid.uuid4().hex[:10]
+    user_id = f"test-google-user-exp-{suffix}"
+    session_token = f"test_session_exp_{suffix}"
+    email = f"test.google.exp.{suffix}@example.com"
+    now = datetime.now(timezone.utc)
+    mongo_db.users.insert_one({
+        "id": user_id, "email": email, "name": "Expired User",
+        "provider": "google", "plan": "free", "created_at": now.isoformat(),
+    })
+    mongo_db.user_sessions.insert_one({
+        "user_id": user_id, "session_token": session_token,
+        "expires_at": (now - timedelta(hours=1)).isoformat(),
+        "created_at": now.isoformat(),
+    })
+    yield {"user_id": user_id, "session_token": session_token}
+    mongo_db.user_sessions.delete_many({"session_token": session_token})
+    mongo_db.users.delete_many({"id": user_id})
+
+
+def test_google_session_bogus_session_id_returns_401():
+    r = requests.post(f"{API}/auth/google/session", json={"session_id": "bogus-does-not-exist-xxx"})
+    assert r.status_code == 401, r.text
+
+
+def test_seeded_session_authenticates_me_via_cookie(seeded_google_session):
+    r = requests.get(f"{API}/auth/me", cookies={"session_token": seeded_google_session["session_token"]})
+    assert r.status_code == 200, r.text
+    u = r.json()["user"]
+    assert u["email"] == seeded_google_session["email"]
+    assert u["provider"] == "google"
+    assert "picture" in u
+
+
+def test_seeded_session_authenticates_me_via_bearer(seeded_google_session):
+    r = requests.get(f"{API}/auth/me",
+                     headers={"Authorization": f"Bearer {seeded_google_session['session_token']}"})
+    assert r.status_code == 200, r.text
+    assert r.json()["user"]["email"] == seeded_google_session["email"]
+
+
+def test_seeded_session_can_list_pets_and_breaches(seeded_google_session):
+    cookies = {"session_token": seeded_google_session["session_token"]}
+    r_pets = requests.get(f"{API}/pets", cookies=cookies)
+    assert r_pets.status_code == 200
+    assert isinstance(r_pets.json()["pets"], list)
+    r_br = requests.get(f"{API}/breaches", cookies=cookies)
+    assert r_br.status_code == 200
+    assert isinstance(r_br.json()["breaches"], list)
+
+
+def test_me_without_auth_returns_401():
+    r = requests.get(f"{API}/auth/me")
+    assert r.status_code == 401
+
+
+def test_legacy_jwt_me_includes_provider_email(signup_user, auth_headers):
+    r = requests.get(f"{API}/auth/me", headers=auth_headers)
+    assert r.status_code == 200
+    u = r.json()["user"]
+    assert u["email"] == signup_user["email"]
+    assert u.get("provider") == "email"
+    assert "picture" in u  # may be None but should be present
+
+
+def test_expired_session_rejected(expired_google_session):
+    r = requests.get(f"{API}/auth/me",
+                     cookies={"session_token": expired_google_session["session_token"]})
+    assert r.status_code == 401
+    r2 = requests.get(f"{API}/pets",
+                      cookies={"session_token": expired_google_session["session_token"]})
+    assert r2.status_code == 401
+
+
+def test_logout_deletes_session_and_clears_cookie(seeded_google_session, mongo_db):
+    st = seeded_google_session["session_token"]
+    # Confirm session works pre-logout
+    pre = requests.get(f"{API}/auth/me", cookies={"session_token": st})
+    assert pre.status_code == 200
+    # Logout
+    r = requests.post(f"{API}/auth/logout", cookies={"session_token": st})
+    assert r.status_code == 200
+    # Set-Cookie should be present and clearing session_token
+    set_cookie = r.headers.get("set-cookie", "").lower()
+    assert "session_token=" in set_cookie
+    assert ("max-age=0" in set_cookie
+            or "expires=thu, 01 jan 1970" in set_cookie
+            or "expires=" in set_cookie)
+    # DB doc removed
+    assert mongo_db.user_sessions.find_one({"session_token": st}) is None
+    # Subsequent request fails
+    post = requests.get(f"{API}/auth/me", cookies={"session_token": st})
+    assert post.status_code == 401
+
+
 # ---------- WebSocket ----------
 def test_websocket_broadcast():
     try:

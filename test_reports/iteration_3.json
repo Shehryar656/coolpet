@@ -1,0 +1,24 @@
+{
+  "summary": "Backend regression + Emergent Google Auth coverage. Added 9 new tests to /app/backend/tests/backend_test.py covering: bogus session_id → 401, cookie-authenticated /auth/me, Bearer-authenticated /auth/me, cookie access to /pets and /breaches, missing auth → 401, legacy JWT /auth/me now returns provider='email' and includes picture, expired session token rejected, and POST /auth/logout deletes user_sessions doc + emits clearing Set-Cookie. Google sessions are seeded directly in Mongo per the auth_testing.md playbook (no real hits to demobackend.emergentagent.com). All 37 tests pass (28 prior + 9 new). No backend issues found.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is ~780 lines — consider splitting into modules (auth, pets, iot, payments, ws) for maintainability.",
+    "get_current_user tries the Bearer token as an Emergent session before falling back to JWT decoding. This works but adds an extra Mongo round-trip per JWT request; consider a quick heuristic (JWT has two dots) to short-circuit.",
+    "CORSMiddleware is added AFTER app.include_router(api_router). In Starlette middleware ordering is inside-out, so this still works for FastAPI, but the conventional pattern is to add middleware before routers — worth verifying no edge case (esp. with allow_credentials=True + specific origins) affects preflight for future routes.",
+    "logout uses response.delete_cookie without matching all cookie attrs (httponly missing). Browsers match on name/path/domain so it functionally clears, but for parity with set_cookie consider passing httponly=True as well.",
+    "google_session upserts by email; if a legacy email/password user signs in with Google using the same email, their `provider` gets overwritten to 'google' and password login still works (password_hash left intact). Intentional? Worth documenting."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py"],
+  "success_rate": {"backend": "100%", "frontend": "not tested (skipped per request)"},
+  "test_credentials": "ada@coolpet.io / secret123 (legacy JWT); Google sessions seeded in Mongo per playbook.",
+  "seed_data_creation": "Per-test fixtures create+cleanup users in db.users and sessions in db.user_sessions (prefixed test-google-user-*, test_session_*). Cleanup runs in fixture teardown.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "backend_test.py now covers Google auth via seeded Mongo sessions using pymongo. Uses MongoClient with MONGO_URL/DB_NAME from backend/.env. Do NOT hit demobackend.emergentagent.com from tests — only 401 case exercises it. IOT ingest requires HMAC X-Device-Signature (IOT_DEVICE_SECRET from backend/.env)."
+}

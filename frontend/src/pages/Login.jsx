@@ -4,6 +4,7 @@ import { motion } from "framer-motion";
 import { ArrowUpRight, PawPrint } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import { toast } from "sonner";
+import GoogleAuthButton from "../components/GoogleAuthButton";
 
 export default function Login() {
   const nav = useNavigate();
@@ -88,6 +89,15 @@ export default function Login() {
           >
             {busy ? "Signing in…" : "Sign in"} <ArrowUpRight size={16} />
           </button>
+
+          <div className="mt-6 flex items-center gap-3">
+            <div className="flex-1 h-px bg-white/10" />
+            <span className="text-[10px] uppercase tracking-widest text-white/40">or</span>
+            <div className="flex-1 h-px bg-white/10" />
+          </div>
+          <div className="mt-4">
+            <GoogleAuthButton testId="login-google-button" />
+          </div>
 
           <p className="mt-6 text-sm text-white/50">
             No account yet?{" "}
