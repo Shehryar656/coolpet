@@ -8,6 +8,8 @@ import logging
 import asyncio
 import random
 import math
+import hmac
+import hashlib
 import jwt as pyjwt
 import bcrypt
 from pathlib import Path
@@ -29,6 +31,9 @@ db = client[os.environ['DB_NAME']]
 JWT_SECRET = os.environ.get('JWT_SECRET', 'dev_secret')
 JWT_ALG = 'HS256'
 JWT_TTL_HOURS = 24 * 7
+IOT_DEVICE_SECRET = os.environ.get('IOT_DEVICE_SECRET', '')
+
+PET_PALETTE = ["#00E5FF", "#D4AF37", "#34C759", "#FF3B30", "#B983FF", "#FF9F0A", "#5AC8FA", "#FF375F"]
 
 app = FastAPI(title="CoolPet API")
 api_router = APIRouter(prefix="/api")
@@ -205,13 +210,16 @@ async def list_pets(user=Depends(get_current_user)):
 
 @api_router.post("/pets")
 async def create_pet(data: PetCreate, user=Depends(get_current_user)):
+    # count existing pets so we can pick the next palette color
+    existing = await db.pets.count_documents({"user_id": user["id"]})
+    color = data.color if data.color and data.color != "#00E5FF" else PET_PALETTE[existing % len(PET_PALETTE)]
     pet = Pet(
         user_id=user["id"],
         name=data.name,
         species=data.species,
         breed=data.breed,
         imei=(data.imei or f"860{random.randint(100000000000, 999999999999)}").lower(),
-        color=data.color,
+        color=color,
         avatar=data.avatar,
     )
     doc = pet.model_dump()
@@ -239,12 +247,64 @@ async def delete_pet(pet_id: str, user=Depends(get_current_user)):
     return {"ok": True}
 
 @api_router.get("/pets/{pet_id}/history")
-async def pet_history(pet_id: str, user=Depends(get_current_user)):
+async def pet_history(pet_id: str, hours: int = 24, limit: int = 500, user=Depends(get_current_user)):
     pet = await db.pets.find_one({"id": pet_id, "user_id": user["id"]}, {"_id": 0})
     if not pet:
         raise HTTPException(404, "Pet not found")
-    points = await db.locations.find({"pet_id": pet_id}, {"_id": 0}).sort("timestamp", -1).limit(100).to_list(100)
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    points = await db.locations.find(
+        {"pet_id": pet_id, "timestamp": {"$gte": since}},
+        {"_id": 0},
+    ).sort("timestamp", -1).limit(limit).to_list(limit)
     return {"points": list(reversed(points))}
+
+# ------------------------------------------------------------------
+# Breach alerts (in-app)
+# ------------------------------------------------------------------
+async def record_breach(pet: Dict[str, Any], lat: float, lng: float, event_type: str, timestamp: str):
+    """event_type = 'exit' | 'enter'"""
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": pet["user_id"],
+        "pet_id": pet["id"],
+        "pet_name": pet["name"],
+        "pet_color": pet.get("color", "#00E5FF"),
+        "event": event_type,
+        "lat": lat,
+        "lng": lng,
+        "geofence_lat": pet["geofence_lat"],
+        "geofence_lng": pet["geofence_lng"],
+        "geofence_radius": pet["geofence_radius"],
+        "read": False,
+        "created_at": timestamp,
+    }
+    await db.breaches.insert_one(doc)
+    payload = {"type": "breach_alert", **{k: v for k, v in doc.items() if k != "_id"}}
+    await manager.broadcast(payload)
+    return doc
+
+@api_router.get("/breaches")
+async def list_breaches(unread_only: bool = False, limit: int = 50, user=Depends(get_current_user)):
+    q = {"user_id": user["id"]}
+    if unread_only:
+        q["read"] = False
+    docs = await db.breaches.find(q, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)
+    return {"breaches": docs}
+
+@api_router.patch("/breaches/{breach_id}/read")
+async def mark_breach_read(breach_id: str, user=Depends(get_current_user)):
+    res = await db.breaches.update_one(
+        {"id": breach_id, "user_id": user["id"]},
+        {"$set": {"read": True}},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(404, "Breach not found")
+    return {"ok": True}
+
+@api_router.post("/breaches/read-all")
+async def mark_all_breaches_read(user=Depends(get_current_user)):
+    await db.breaches.update_many({"user_id": user["id"], "read": False}, {"$set": {"read": True}})
+    return {"ok": True}
 
 # ------------------------------------------------------------------
 # IoT ingestion — HEX packet parser (JT/T 794 inspired)
@@ -282,26 +342,49 @@ def parse_hex_packet(hex_str: str) -> Dict[str, Any]:
 class HexIngestRequest(BaseModel):
     hex: str
 
+def verify_device_signature(body: bytes, signature: Optional[str]) -> bool:
+    """HMAC-SHA256 of the raw request body, hex-encoded, sent in X-Device-Signature."""
+    if not IOT_DEVICE_SECRET:
+        # secret not configured — accept everything (dev fallback)
+        return True
+    if not signature:
+        return False
+    expected = hmac.new(IOT_DEVICE_SECRET.encode(), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature.strip().lower())
+
 @api_router.post("/iot/ingest")
-async def ingest_hex(data: HexIngestRequest):
+async def ingest_hex(request: Request):
     """
-    Public endpoint (IoT devices don't hold JWTs). In production, protect with a
-    device shared secret / mutual TLS. Parses HEX, updates the matching pet by
-    IMEI, appends a location point, and broadcasts to WebSocket subscribers.
+    Authenticated device endpoint. Requires header:
+        X-Device-Signature: <hex HMAC-SHA256 of raw body using IOT_DEVICE_SECRET>
+    Parses the HEX packet, updates the matching pet by IMEI, appends a location
+    point, detects geofence-boundary crossings, and broadcasts over WebSocket.
     """
+    body = await request.body()
+    sig = request.headers.get("X-Device-Signature") or request.headers.get("x-device-signature")
+    if not verify_device_signature(body, sig):
+        raise HTTPException(401, "Invalid or missing X-Device-Signature")
+
     try:
-        parsed = parse_hex_packet(data.hex)
+        payload_json = HexIngestRequest.model_validate_json(body)
+    except Exception:
+        raise HTTPException(400, "Invalid JSON body")
+
+    try:
+        parsed = parse_hex_packet(payload_json.hex)
     except Exception as e:
         raise HTTPException(400, f"parse error: {e}")
 
     pet = await db.pets.find_one({"imei": parsed["imei"]}, {"_id": 0})
     if not pet:
-        # not registered — broadcast anonymously as raw device
         payload = {"type": "raw_device", **parsed, "timestamp": datetime.now(timezone.utc).isoformat()}
         await manager.broadcast(payload)
         return {"ok": True, "matched_pet": None, "parsed": parsed}
 
     now_iso = datetime.now(timezone.utc).isoformat()
+    prev_inside = pet.get("inside_geofence", True)
+    inside = _within_geofence(parsed["lat"], parsed["lng"], pet["geofence_lat"], pet["geofence_lng"], pet["geofence_radius"])
+
     await db.pets.update_one(
         {"id": pet["id"]},
         {"$set": {
@@ -310,6 +393,7 @@ async def ingest_hex(data: HexIngestRequest):
             "latest_bpm": parsed["bpm"],
             "latest_battery": parsed["battery"],
             "latest_speed": parsed["speed"],
+            "inside_geofence": inside,
             "updated_at": now_iso,
         }},
     )
@@ -319,8 +403,12 @@ async def ingest_hex(data: HexIngestRequest):
     )
     await db.locations.insert_one(point.model_dump())
 
-    # Geofence check
-    inside = _within_geofence(parsed["lat"], parsed["lng"], pet["geofence_lat"], pet["geofence_lng"], pet["geofence_radius"])
+    # Boundary crossing → breach event
+    if prev_inside and not inside:
+        await record_breach(pet, parsed["lat"], parsed["lng"], "exit", now_iso)
+    elif not prev_inside and inside:
+        await record_breach(pet, parsed["lat"], parsed["lng"], "enter", now_iso)
+
     payload = {
         "type": "pet_update",
         "pet_id": pet["id"],
@@ -510,10 +598,13 @@ async def _simulator_loop():
                     new_batt = max(5, pet["latest_battery"] - (1 if tick % 30 == 0 else 0))
                     new_speed = round(random.uniform(0.0, 3.5), 2)
                     now_iso = datetime.now(timezone.utc).isoformat()
+                    prev_inside = pet.get("inside_geofence", True)
+                    inside = _within_geofence(new_lat, new_lng, pet["geofence_lat"], pet["geofence_lng"], pet["geofence_radius"])
                     await db.pets.update_one({"id": pet["id"]}, {"$set": {
                         "latest_lat": new_lat, "latest_lng": new_lng,
                         "latest_bpm": new_bpm, "latest_battery": new_batt,
-                        "latest_speed": new_speed, "updated_at": now_iso,
+                        "latest_speed": new_speed, "inside_geofence": inside,
+                        "updated_at": now_iso,
                     }})
                     await db.locations.insert_one({
                         "id": str(uuid.uuid4()),
@@ -522,7 +613,10 @@ async def _simulator_loop():
                         "battery": new_batt, "speed": new_speed,
                         "timestamp": now_iso,
                     })
-                    inside = _within_geofence(new_lat, new_lng, pet["geofence_lat"], pet["geofence_lng"], pet["geofence_radius"])
+                    if prev_inside and not inside:
+                        await record_breach(pet, new_lat, new_lng, "exit", now_iso)
+                    elif not prev_inside and inside:
+                        await record_breach(pet, new_lat, new_lng, "enter", now_iso)
                     await manager.broadcast({
                         "type": "pet_update",
                         "pet_id": pet["id"],

@@ -3,22 +3,26 @@ import { MapContainer, TileLayer, Marker, Circle, Polyline, useMap } from "react
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { motion, AnimatePresence } from "framer-motion";
-import { PawPrint, LogOut, Plus, HeartPulse, BatteryMedium, Gauge, MapPin, Radio, Trash2, Signal } from "lucide-react";
+import { PawPrint, LogOut, Plus, HeartPulse, BatteryMedium, Gauge, MapPin, Radio, Trash2, Signal, Users, User, History } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { api, wsURL } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { Slider } from "../components/ui/slider";
 import { toast } from "sonner";
+import NotificationsBell from "../components/NotificationsBell";
+import TrailReplay from "../components/TrailReplay";
 
 delete L.Icon.Default.prototype._getIconUrl;
 
-const petIcon = (color = "#00E5FF") =>
-  L.divIcon({
+const petIcon = (color = "#00E5FF", small = false) => {
+  const size = small ? 16 : 22;
+  return L.divIcon({
     className: "",
-    html: `<div class="cp-pet-marker" style="background:${color};box-shadow:0 0 0 4px ${color}33, 0 0 20px ${color};"></div>`,
-    iconSize: [22, 22],
-    iconAnchor: [11, 11],
+    html: `<div class="cp-pet-marker" style="background:${color};width:${size}px;height:${size}px;box-shadow:0 0 0 4px ${color}33, 0 0 20px ${color};"></div>`,
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size / 2],
   });
+};
 
 function Recenter({ lat, lng, trigger }) {
   const map = useMap();
@@ -29,16 +33,37 @@ function Recenter({ lat, lng, trigger }) {
   return null;
 }
 
+function FitBounds({ points, trigger }) {
+  const map = useMap();
+  useEffect(() => {
+    if (!points.length) return;
+    if (points.length === 1) {
+      map.flyTo(points[0], 16, { duration: 0.6 });
+    } else {
+      const bounds = L.latLngBounds(points);
+      map.flyToBounds(bounds.pad(0.25), { duration: 0.6 });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trigger]);
+  return null;
+}
+
 export default function Dashboard() {
   const nav = useNavigate();
   const { user, logout } = useAuth();
   const [pets, setPets] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
+  const [viewMode, setViewMode] = useState("single"); // 'single' | 'all'
+  const [visiblePetIds, setVisiblePetIds] = useState(new Set());
   const [trail, setTrail] = useState([]);
   const [recenterKey, setRecenterKey] = useState(0);
+  const [fitKey, setFitKey] = useState(0);
   const [addOpen, setAddOpen] = useState(false);
   const [newPet, setNewPet] = useState({ name: "", species: "Dog", breed: "" });
   const [flash, setFlash] = useState(false);
+  const [replayOpen, setReplayOpen] = useState(false);
+  const [replayFocus, setReplayFocus] = useState(null);
+  const [latestBreach, setLatestBreach] = useState(null);
   const wsRef = useRef(null);
 
   const selected = useMemo(() => pets.find((p) => p.id === selectedId) || pets[0], [pets, selectedId]);
@@ -47,16 +72,32 @@ export default function Dashboard() {
     const { data } = await api.get("/pets");
     setPets(data.pets);
     if (data.pets.length && !selectedId) setSelectedId(data.pets[0].id);
+    setVisiblePetIds((prev) => {
+      if (prev.size === 0) return new Set(data.pets.map((p) => p.id));
+      const next = new Set(prev);
+      data.pets.forEach((p) => next.add(p.id));
+      return next;
+    });
   };
 
   const loadTrail = async (petId) => {
     if (!petId) return setTrail([]);
-    const { data } = await api.get(`/pets/${petId}/history`);
+    const { data } = await api.get(`/pets/${petId}/history?hours=24&limit=500`);
     setTrail(data.points.map((p) => [p.lat, p.lng]));
   };
 
   useEffect(() => { loadPets(); /* eslint-disable-next-line */ }, []);
-  useEffect(() => { if (selected) { loadTrail(selected.id); setRecenterKey((k) => k + 1); } /* eslint-disable-next-line */ }, [selectedId]);
+  useEffect(() => {
+    if (viewMode === "single" && selected) {
+      loadTrail(selected.id);
+      setRecenterKey((k) => k + 1);
+    }
+    // eslint-disable-next-line
+  }, [selectedId, viewMode]);
+
+  useEffect(() => {
+    if (viewMode === "all" && pets.length) setFitKey((k) => k + 1);
+  }, [viewMode, pets.length]);
 
   // WebSocket live updates
   useEffect(() => {
@@ -67,16 +108,19 @@ export default function Dashboard() {
       ws.onmessage = (ev) => {
         try {
           const msg = JSON.parse(ev.data);
-          if (msg.type !== "pet_update") return;
-          setPets((prev) => prev.map((p) => p.id === msg.pet_id ? {
-            ...p, latest_lat: msg.lat, latest_lng: msg.lng, latest_bpm: msg.bpm,
-            latest_battery: msg.battery, latest_speed: msg.speed,
-            inside_geofence: msg.inside_geofence,
-          } : p));
-          if (selectedId === msg.pet_id || (!selectedId && msg.pet_id)) {
-            setTrail((prev) => [...prev.slice(-99), [msg.lat, msg.lng]]);
-            setFlash(true);
-            setTimeout(() => setFlash(false), 500);
+          if (msg.type === "pet_update") {
+            setPets((prev) => prev.map((p) => p.id === msg.pet_id ? {
+              ...p, latest_lat: msg.lat, latest_lng: msg.lng, latest_bpm: msg.bpm,
+              latest_battery: msg.battery, latest_speed: msg.speed,
+              inside_geofence: msg.inside_geofence,
+            } : p));
+            if (viewMode === "single" && selectedId === msg.pet_id) {
+              setTrail((prev) => [...prev.slice(-499), [msg.lat, msg.lng]]);
+              setFlash(true);
+              setTimeout(() => setFlash(false), 500);
+            }
+          } else if (msg.type === "breach_alert" && msg.user_id === user?.id) {
+            setLatestBreach({ ...msg, _t: Date.now() });
           }
         } catch { /* noop */ }
       };
@@ -85,7 +129,7 @@ export default function Dashboard() {
     };
     connect();
     return () => { alive = false; if (wsRef.current) try { wsRef.current.close(); } catch { /* noop */ } };
-  }, [selectedId]);
+  }, [selectedId, viewMode, user?.id]);
 
   const createPet = async (e) => {
     e.preventDefault();
@@ -96,6 +140,7 @@ export default function Dashboard() {
       setNewPet({ name: "", species: "Dog", breed: "" });
       await loadPets();
       setSelectedId(data.pet.id);
+      setViewMode("single");
     } catch (e) {
       toast.error("Could not enroll pet");
     }
@@ -121,6 +166,20 @@ export default function Dashboard() {
 
   const handleLogout = () => { logout(); nav("/"); };
 
+  const togglePetVisibility = (id) => {
+    setVisiblePetIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const allVisiblePoints = pets.filter((p) => visiblePetIds.has(p.id)).map((p) => [p.latest_lat, p.latest_lng]);
+
+  // In single mode with replay open, the marker follows the replay focus.
+  const displayLat = replayFocus?.lat ?? selected?.latest_lat;
+  const displayLng = replayFocus?.lng ?? selected?.latest_lng;
+
   return (
     <div className="min-h-screen bg-[#050505] text-white flex">
       {/* Sidebar */}
@@ -130,6 +189,25 @@ export default function Dashboard() {
             <PawPrint size={14} className="text-black" />
           </div>
           <span className="tracking-widest uppercase text-sm">CoolPet</span>
+        </div>
+
+        <div className="p-4 border-b border-white/5">
+          <div className="grid grid-cols-2 gap-1 cp-panel rounded-full p-1" data-testid="view-mode-toggle">
+            <button
+              onClick={() => setViewMode("single")}
+              data-testid="view-mode-single"
+              className={`flex items-center justify-center gap-1.5 text-xs py-1.5 rounded-full transition-colors ${viewMode === "single" ? "bg-[#D4AF37] text-black" : "text-white/60 hover:text-white"}`}
+            >
+              <User size={12} /> Single
+            </button>
+            <button
+              onClick={() => setViewMode("all")}
+              data-testid="view-mode-all"
+              className={`flex items-center justify-center gap-1.5 text-xs py-1.5 rounded-full transition-colors ${viewMode === "all" ? "bg-[#D4AF37] text-black" : "text-white/60 hover:text-white"}`}
+            >
+              <Users size={12} /> All pets
+            </button>
+          </div>
         </div>
 
         <div className="p-6">
@@ -151,29 +229,48 @@ export default function Dashboard() {
                 No collars enrolled yet. Add one to start streaming.
               </div>
             )}
-            {pets.map((p) => (
-              <button
-                key={p.id}
-                onClick={() => setSelectedId(p.id)}
-                data-testid={`dashboard-pet-${p.id}`}
-                className={`w-full text-left rounded-xl p-3 border transition-colors duration-300 ${
-                  selected?.id === p.id ? "border-[#D4AF37]/60 bg-[#D4AF37]/5" : "border-white/5 hover:border-white/15"
-                }`}
-              >
-                <div className="flex items-center gap-3">
-                  <div className="w-8 h-8 rounded-full flex items-center justify-center" style={{ background: p.color + "22", border: `1px solid ${p.color}55` }}>
-                    <PawPrint size={14} style={{ color: p.color }} />
+            {pets.map((p) => {
+              const active = viewMode === "single" ? selected?.id === p.id : visiblePetIds.has(p.id);
+              return (
+                <div
+                  key={p.id}
+                  data-testid={`dashboard-pet-${p.id}`}
+                  className={`rounded-xl p-3 border transition-colors duration-300 ${
+                    active ? "border-[#D4AF37]/60 bg-[#D4AF37]/5" : "border-white/5 hover:border-white/15"
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    {viewMode === "all" ? (
+                      <input
+                        type="checkbox"
+                        checked={visiblePetIds.has(p.id)}
+                        onChange={() => togglePetVisibility(p.id)}
+                        className="accent-[#D4AF37] w-4 h-4"
+                        data-testid={`toggle-pet-${p.id}`}
+                      />
+                    ) : null}
+                    <button
+                      onClick={() => { setSelectedId(p.id); if (viewMode !== "single") setViewMode("single"); }}
+                      className="flex-1 flex items-center gap-3 min-w-0 text-left"
+                    >
+                      <div className="w-8 h-8 rounded-full flex items-center justify-center shrink-0" style={{ background: p.color + "22", border: `1px solid ${p.color}55` }}>
+                        <PawPrint size={14} style={{ color: p.color }} />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm truncate flex items-center gap-2">
+                          {p.name}
+                          {p.inside_geofence === false && <span className="w-1.5 h-1.5 rounded-full bg-[#FF3B30]" />}
+                        </div>
+                        <div className="text-[10px] cp-mono text-white/40 truncate">IMEI · {p.imei.slice(-8)}</div>
+                      </div>
+                    </button>
+                    <button onClick={() => deletePet(p.id)} className="text-white/40 hover:text-[#FF3B30] cursor-pointer transition-colors" data-testid={`delete-pet-${p.id}`}>
+                      <Trash2 size={13} />
+                    </button>
                   </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm truncate">{p.name}</div>
-                    <div className="text-[10px] cp-mono text-white/40 truncate">IMEI · {p.imei.slice(-8)}</div>
-                  </div>
-                  <span onClick={(e) => { e.stopPropagation(); deletePet(p.id); }} className="opacity-0 group-hover:opacity-100 text-white/40 hover:text-[#FF3B30] cursor-pointer" data-testid={`delete-pet-${p.id}`}>
-                    <Trash2 size={13} />
-                  </span>
                 </div>
-              </button>
-            ))}
+              );
+            })}
           </div>
         </div>
 
@@ -199,16 +296,22 @@ export default function Dashboard() {
             <span className="cp-pulse" />
             <span className="text-white/70">Live IoT ingestion</span>
             <span className="text-white/30">·</span>
-            <span className="cp-mono text-white/50 text-xs"><Signal size={11} className="inline mr-1" />JT/T 794 · 2s</span>
+            <span className="cp-mono text-white/50 text-xs"><Signal size={11} className="inline mr-1" />JT/T 794 · HMAC-SHA256</span>
           </div>
-          {selected && (
-            <div className="cp-glass rounded-full px-5 py-2 text-sm flex items-center gap-3">
-              <MapPin size={14} className="text-[#D4AF37]" />
-              <span className="cp-mono text-xs text-white/70">
-                {selected.latest_lat.toFixed(5)}° · {selected.latest_lng.toFixed(5)}°
-              </span>
-            </div>
-          )}
+
+          <div className="flex items-center gap-3">
+            {selected && viewMode === "single" && (
+              <button
+                onClick={() => setReplayOpen((v) => !v)}
+                data-testid="open-trail-replay"
+                className="cp-glass rounded-full px-4 py-2 text-sm flex items-center gap-2 hover:bg-white/10 transition-colors"
+              >
+                <History size={14} className="text-[#D4AF37]" />
+                <span>{replayOpen ? "Close replay" : "Trail replay · 24h"}</span>
+              </button>
+            )}
+            <NotificationsBell latestBreach={latestBreach} />
+          </div>
         </div>
 
         <div className="h-screen">
@@ -224,26 +327,53 @@ export default function Dashboard() {
               url="https://tile.openstreetmap.org/{z}/{x}/{y}.png"
               attribution='&copy; OpenStreetMap'
             />
-            {selected && (
+
+            {/* SINGLE MODE */}
+            {viewMode === "single" && selected && (
               <>
                 <Circle
                   center={[selected.geofence_lat, selected.geofence_lng]}
                   radius={selected.geofence_radius}
                   pathOptions={{ color: "#D4AF37", weight: 1.5, fillOpacity: 0.06 }}
                 />
-                <Polyline positions={trail} pathOptions={{ color: "#00E5FF", weight: 2, opacity: 0.6 }} />
+                {!replayOpen && (
+                  <Polyline positions={trail} pathOptions={{ color: "#00E5FF", weight: 2, opacity: 0.6 }} />
+                )}
                 <Marker
-                  position={[selected.latest_lat, selected.latest_lng]}
+                  position={[displayLat, displayLng]}
                   icon={petIcon(selected.color)}
                 />
-                <Recenter lat={selected.latest_lat} lng={selected.latest_lng} trigger={recenterKey} />
+                {!replayOpen && <Recenter lat={selected.latest_lat} lng={selected.latest_lng} trigger={recenterKey} />}
+                {replayOpen && (
+                  <TrailReplay
+                    petId={selected.id}
+                    onFocus={(p) => setReplayFocus(p)}
+                    onClose={() => { setReplayOpen(false); setReplayFocus(null); }}
+                  />
+                )}
               </>
             )}
+
+            {/* ALL MODE */}
+            {viewMode === "all" && pets.filter((p) => visiblePetIds.has(p.id)).map((p) => (
+              <React.Fragment key={p.id}>
+                <Circle
+                  center={[p.geofence_lat, p.geofence_lng]}
+                  radius={p.geofence_radius}
+                  pathOptions={{ color: p.color, weight: 1, opacity: 0.35, fillOpacity: 0.04 }}
+                />
+                <Marker
+                  position={[p.latest_lat, p.latest_lng]}
+                  icon={petIcon(p.color, true)}
+                />
+              </React.Fragment>
+            ))}
+            {viewMode === "all" && allVisiblePoints.length > 0 && <FitBounds points={allVisiblePoints} trigger={fitKey} />}
           </MapContainer>
         </div>
 
-        {/* Floating health card */}
-        {selected && (
+        {/* Floating health card (single mode) */}
+        {viewMode === "single" && selected && !replayOpen && (
           <motion.div
             initial={{ opacity: 0, y: 30 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }}
             className="absolute bottom-6 left-6 cp-glass rounded-3xl p-6 w-[360px] z-[1000]"
@@ -307,6 +437,36 @@ export default function Dashboard() {
             <div className="mt-5 pt-5 border-t border-white/5 flex items-center justify-between text-[11px] text-white/40 cp-mono">
               <span className="flex items-center gap-1.5"><Radio size={11} className={flash ? "text-[#00E5FF]" : "text-white/40"} /> Streaming</span>
               <span>IMEI · {selected.imei.slice(-10)}</span>
+            </div>
+          </motion.div>
+        )}
+
+        {/* Floating summary (all mode) */}
+        {viewMode === "all" && (
+          <motion.div
+            initial={{ opacity: 0, y: 30 }} animate={{ opacity: 1, y: 0 }}
+            className="absolute bottom-6 left-6 cp-glass rounded-3xl p-6 w-[360px] z-[1000]"
+            data-testid="dashboard-summary-card"
+          >
+            <span className="cp-overline">Household summary</span>
+            <div className="mt-2 flex items-baseline gap-2">
+              <div className="text-4xl font-light">{pets.filter((p) => visiblePetIds.has(p.id)).length}</div>
+              <div className="text-sm text-white/50">/ {pets.length} pets tracked</div>
+            </div>
+            <div className="mt-5 space-y-2">
+              {pets.filter((p) => visiblePetIds.has(p.id)).map((p) => (
+                <div key={p.id} className="flex items-center gap-3 text-sm">
+                  <span className="w-2.5 h-2.5 rounded-full" style={{ background: p.color, boxShadow: `0 0 10px ${p.color}` }} />
+                  <span className="flex-1 truncate">{p.name}</span>
+                  <span className={`text-[10px] cp-mono ${p.inside_geofence === false ? "text-[#FF3B30]" : "text-[#34C759]"}`}>
+                    {p.inside_geofence === false ? "OUT" : "SAFE"}
+                  </span>
+                  <span className="text-[10px] cp-mono text-white/40">{p.latest_bpm}bpm</span>
+                </div>
+              ))}
+              {pets.filter((p) => visiblePetIds.has(p.id)).length === 0 && (
+                <div className="text-white/40 text-xs">No pets visible. Toggle collars in the sidebar.</div>
+              )}
             </div>
           </motion.div>
         )}
